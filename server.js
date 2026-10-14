@@ -13,13 +13,13 @@ const rooms = {};
 
 const ROLE_INFO = {
   gm: { name: 'GM（進行役）', icon: '👑', team: 'gm' },
-  villager: { name: '市民', icon: '👤', team: 'village' },
+  wolf: { name: '人狼', icon: '🐺', team: 'wolf' },
+  madman: { name: '狂人', icon: '🃏', team: 'wolf' },
   seer: { name: '占い師', icon: '🔮', team: 'village' },
   medium: { name: '霊媒師', icon: '👻', team: 'village' },
   knight: { name: '騎士', icon: '🛡️', team: 'village' },
-  baker: { name: 'パン屋', icon: '🍞', team: 'village' },
-  madman: { name: '狂人', icon: '🃏', team: 'wolf' },
-  wolf: { name: '人狼', icon: '🐺', team: 'wolf' }
+  villager: { name: '市民', icon: '👤', team: 'village' },
+  baker: { name: 'パン屋', icon: '🍞', team: 'village' }
 };
 
 function generateRoomCode() {
@@ -32,26 +32,6 @@ function getPlayers(room) {
 
 function getAlivePlayers(room) {
   return room.participants.filter(p => !p.isGM && p.alive);
-}
-
-// 生存人数に応じたプリセット構成
-function getDefaultRoleConfig(count, includeBaker) {
-  const presets = {
-    4:  { wolf: 1, madman: 0, seer: 1, medium: 0, knight: 1, baker: 0 },
-    5:  { wolf: 1, madman: 0, seer: 1, medium: 1, knight: 1, baker: 0 },
-    6:  { wolf: 1, madman: 1, seer: 1, medium: 1, knight: 1, baker: 0 },
-    7:  { wolf: 2, madman: 0, seer: 1, medium: 1, knight: 1, baker: 0 },
-    8:  { wolf: 2, madman: 1, seer: 1, medium: 1, knight: 1, baker: 0 },
-    9:  { wolf: 2, madman: 1, seer: 1, medium: 1, knight: 1, baker: 0 },
-    10: { wolf: 2, madman: 1, seer: 1, medium: 1, knight: 1, baker: includeBaker ? 1 : 0 },
-    11: { wolf: 2, madman: 1, seer: 1, medium: 1, knight: 1, baker: includeBaker ? 1 : 0 },
-    12: { wolf: 3, madman: 1, seer: 1, medium: 1, knight: 1, baker: includeBaker ? 1 : 0 }
-  };
-  const base = presets[count] || { wolf: 2, madman: 1, seer: 1, medium: 1, knight: 1, baker: includeBaker ? 1 : 0 };
-  if (!includeBaker) base.baker = 0;
-  const specialSum = base.wolf + base.madman + base.seer + base.medium + base.knight + base.baker;
-  base.villager = Math.max(0, count - specialSum);
-  return base;
 }
 
 // 昼や夜で未完了のアクションがあるかチェック
@@ -85,7 +65,18 @@ function checkWinCondition(room) {
   return null;
 }
 
-// 各クライアントへパーソナライズした状態を送信
+// タイマーの秒数だけを軽量送信（画面の入力欄やプルダウンが閉じないようにするため）
+function broadcastTimer(roomCode) {
+  const room = rooms[roomCode];
+  if (!room) return;
+  io.to(roomCode).emit('timerTick', {
+    timer: room.timer,
+    timerPaused: room.timerPaused,
+    waitingForActions: room.waitingForActions
+  });
+}
+
+// 各クライアントへ状態を送信
 function broadcastRoom(roomCode) {
   const room = rooms[roomCode];
   if (!room) return;
@@ -110,7 +101,6 @@ function broadcastRoom(roomCode) {
       publicNote: p.publicNote,
       isConfirmedWhite: p.isConfirmedWhite,
       voteLocked: p.voteLocked,
-      // ゲーム終了後、またはGM、または仲間人狼には役職を開示
       revealedRole: (isGameOver || viewer.isGM || (isWolf && p.role === 'wolf')) ? p.role : null
     }));
 
@@ -125,7 +115,7 @@ function broadcastRoom(roomCode) {
       pendingActions: viewer.isGM ? pendingActions : [],
       pendingCount: pendingActions.length,
       roleConfig: room.roleConfig,
-      includeBaker: room.includeBaker,
+      timeConfig: room.timeConfig,
       firstSpeaker: room.firstSpeaker,
       morningMessage: room.morningMessage,
       bakerStatus: hadBaker ? (bakerAlive ? 'alive' : 'dead') : 'none',
@@ -169,21 +159,19 @@ function transitionToPhase(room, nextPhase) {
   if (nextPhase === 'night0') {
     room.phase = 'night0';
     room.day = 0;
-    room.timer = 45;
+    room.timer = room.timeConfig.night0;
   } else if (nextPhase === 'day') {
     room.phase = 'day';
     room.daySubPhase = room.day === 1 ? 'order' : 'report';
-    const aliveCount = getAlivePlayers(room).length;
-    room.timer = Math.max(180, (aliveCount - 2) * 60); // 生存人数-2分（最低3分）
+    room.timer = room.timeConfig.day;
   } else if (nextPhase === 'vote') {
     room.phase = 'vote';
     room.currentVotes = {};
-    room.timer = 60;
-  } else if (nextPhase === ' tally_vote') {
+    room.timer = room.timeConfig.vote;
+  } else if (nextPhase === 'tally_vote') {
     tallyVotesAndExecute(room);
     return;
   } else if (nextPhase === 'night') {
-    // 処刑後の勝敗チェック
     const winAfterExec = checkWinCondition(room);
     if (winAfterExec) {
       room.phase = 'gameover';
@@ -193,7 +181,7 @@ function transitionToPhase(room, nextPhase) {
       return;
     }
     room.phase = 'night';
-    room.timer = 60;
+    room.timer = room.timeConfig.night;
     room.nightActions = {
       seerTarget: null,
       seerDone: false,
@@ -228,7 +216,6 @@ function tallyVotesAndExecute(room) {
     }
   });
 
-  // 得票数順に整形
   const breakdown = Object.keys(votersByTarget).map(targetId => {
     const targetPlayer = room.participants.find(p => p.id === targetId);
     return {
@@ -243,7 +230,6 @@ function tallyVotesAndExecute(room) {
     breakdown
   });
 
-  // 最多得票者の特定
   let maxVotes = 0;
   let topTargets = [];
   Object.entries(counts).forEach(([targetId, c]) => {
@@ -255,18 +241,15 @@ function tallyVotesAndExecute(room) {
     }
   });
 
-  // 1名に決まった場合は処刑（同票の場合はランダムまたは最初の人ではなく、初心者村が詰まらないよう同票の中からランダム処刑、またはGM判断）
-  // ここでは動画と同じく最多得票者を処刑対象とする
   const executedId = topTargets[0];
   const executedPlayer = room.participants.find(p => p.id === executedId);
 
   if (executedPlayer) {
     executedPlayer.alive = false;
-    executedPlayer.deathDay = room.day;
+    executedPlayer.deathDay = room.day; // 1日目の昼なら「1日目処刑」と記録
     executedPlayer.deathReason = '処刑';
     room.executedPlayerName = executedPlayer.name;
 
-    // 霊媒師全員に処刑結果を即時付与
     getPlayers(room).filter(p => p.role === 'medium').forEach(med => {
       med.mediumHistory.push({
         day: room.day,
@@ -279,7 +262,7 @@ function tallyVotesAndExecute(room) {
   }
 
   room.phase = 'lastwords';
-  room.timer = 30;
+  room.timer = room.timeConfig.lastwords;
   broadcastRoom(room.code);
 }
 
@@ -288,7 +271,6 @@ function resolveNightAndStartMorning(room) {
   const wolfTargetId = room.nightActions.wolfTarget;
   const knightTargetId = room.nightActions.knightTarget;
 
-  // 騎士の護衛履歴を更新（連続護衛禁止用）
   getAlivePlayers(room).filter(p => p.role === 'knight').forEach(k => {
     if (knightTargetId) k.lastGuardedId = knightTargetId;
   });
@@ -299,7 +281,7 @@ function resolveNightAndStartMorning(room) {
       const target = room.participants.find(p => p.id === wolfTargetId);
       if (target && target.alive) {
         target.alive = false;
-        target.deathDay = room.day + 1;
+        target.deathDay = room.day; // 1日目の夜なら「1日目襲撃」と記録
         target.deathReason = '襲撃';
         victim = target;
       }
@@ -310,7 +292,6 @@ function resolveNightAndStartMorning(room) {
 
   if (victim) {
     room.morningMessage = `昨夜の犠牲者は 【${victim.name}さん】 でした。`;
-    // 次の順番発言の起点を犠牲者の次の生存者にする
     const players = getPlayers(room);
     const victimIdx = players.findIndex(p => p.id === victim.id);
     for (let i = 1; i <= players.length; i++) {
@@ -321,10 +302,9 @@ function resolveNightAndStartMorning(room) {
       }
     }
   } else {
-    room.morningMessage = `昨夜の犠牲者は 【いませんでした】（護衛成功 または 噛み無し）！`;
+    room.morningMessage = `昨夜の犠牲者はいませんでした。`;
   }
 
-  // 朝の勝敗判定
   const winAfterNight = checkWinCondition(room);
   if (winAfterNight) {
     room.phase = 'gameover';
@@ -337,26 +317,26 @@ function resolveNightAndStartMorning(room) {
   transitionToPhase(room, 'day');
 }
 
-// 毎秒のタイマー処理
+// 毎秒のタイマー処理（画面全体ではなく時計のみを更新）
 setInterval(() => {
   Object.values(rooms).forEach(room => {
     if (['lobby', 'gameover'].includes(room.phase)) return;
     if (room.timerPaused) return;
 
     if (room.timer > 0) {
-      // 投票や夜フェーズで未選択者がいる場合、残り1秒でストップして警告を出す
       if (room.timer === 1 && (room.phase === 'vote' || room.phase === 'night')) {
         const pending = getPendingActions(room);
         if (pending.length > 0) {
-          room.waitingForActions = true;
-          broadcastRoom(room.code);
+          if (!room.waitingForActions) {
+            room.waitingForActions = true;
+            broadcastRoom(room.code);
+          }
           return;
         }
       }
       room.timer -= 1;
-      broadcastRoom(room.code);
+      broadcastTimer(room.code);
     } else {
-      // タイマーが0になった時の自動遷移
       if (room.phase === 'night0') {
         room.day = 1;
         room.morningMessage = '1日目の朝です（初日噛み無し）。順番発言を開始してください。';
@@ -364,7 +344,7 @@ setInterval(() => {
       } else if (room.phase === 'day') {
         transitionToPhase(room, 'vote');
       } else if (room.phase === 'vote') {
-        transitionToPhase(room, ' tally_vote');
+        transitionToPhase(room, 'tally_vote');
       } else if (room.phase === 'lastwords') {
         transitionToPhase(room, 'night');
       } else if (room.phase === 'night') {
@@ -375,8 +355,8 @@ setInterval(() => {
 }, 1000);
 
 io.on('connection', socket => {
-  // 部屋作成（GMとして入室）
-  socket.on('createRoom', ({ name, includeBaker }) => {
+  // 部屋作成（GM）
+  socket.on('createRoom', ({ name }) => {
     const code = generateRoomCode();
     const gmParticipant = {
       id: 'GM_' + Math.random().toString(36).substr(2, 6),
@@ -397,8 +377,22 @@ io.on('connection', socket => {
       timer: 0,
       timerPaused: false,
       waitingForActions: false,
-      includeBaker: includeBaker !== false,
-      roleConfig: getDefaultRoleConfig(10, includeBaker !== false),
+      roleConfig: {
+        wolf: 2,
+        madman: 1,
+        seer: 1,
+        medium: 1,
+        knight: 1,
+        villager: 3,
+        baker: 1
+      },
+      timeConfig: {
+        night0: 45,
+        day: 480,
+        vote: 60,
+        lastwords: 30,
+        night: 60
+      },
       participants: [gmParticipant],
       firstSpeaker: '',
       morningMessage: '',
@@ -415,7 +409,7 @@ io.on('connection', socket => {
     broadcastRoom(code);
   });
 
-  // 部屋参加（プレイヤーまたはGM再接続）
+  // 部屋参加
   socket.on('joinRoom', ({ roomCode, name, participantId }) => {
     const room = rooms[roomCode];
     if (!room) {
@@ -423,8 +417,13 @@ io.on('connection', socket => {
       return;
     }
 
-    // 既存参加者の再接続チェック
-    let existing = room.participants.find(p => p.id === participantId || p.name === name);
+    let existing = null;
+    if (participantId) {
+      existing = room.participants.find(p => p.id === participantId);
+    } else if (name) {
+      existing = room.participants.find(p => p.name === name.trim());
+    }
+
     if (existing) {
       existing.socketId = socket.id;
       socket.join(roomCode);
@@ -457,24 +456,30 @@ io.on('connection', socket => {
     };
 
     room.participants.push(newPlayer);
-    const pCount = getPlayers(room).length;
-    if (pCount >= 4) {
-      room.roleConfig = getDefaultRoleConfig(pCount, room.includeBaker);
-    }
-
     socket.join(roomCode);
     socket.emit('joinedRoom', { roomCode, participantId: newPlayer.id });
     broadcastRoom(roomCode);
   });
 
-  // パン屋有無の切り替え（ロビー）
-  socket.on('toggleBaker', ({ roomCode, includeBaker }) => {
+  // GMロビー設定：役職配分の変更
+  socket.on('updateRoleConfig', ({ roomCode, roleKey, delta }) => {
     const room = rooms[roomCode];
     if (!room || room.phase !== 'lobby') return;
-    room.includeBaker = includeBaker;
-    const pCount = Math.max(4, getPlayers(room).length || 10);
-    room.roleConfig = getDefaultRoleConfig(pCount, includeBaker);
-    broadcastRoom(roomCode);
+    if (room.roleConfig[roleKey] !== undefined) {
+      room.roleConfig[roleKey] = Math.max(0, room.roleConfig[roleKey] + delta);
+      broadcastRoom(roomCode);
+    }
+  });
+
+  // GMロビー設定：時間設定の変更
+  socket.on('updateTimeConfig', ({ roomCode, timeKey, seconds }) => {
+    const room = rooms[roomCode];
+    if (!room || room.phase !== 'lobby') return;
+    const val = parseInt(seconds, 10);
+    if (!isNaN(val) && val >= 5) {
+      room.timeConfig[timeKey] = val;
+      broadcastRoom(roomCode);
+    }
   });
 
   // ゲーム開始処理
@@ -482,20 +487,21 @@ io.on('connection', socket => {
     const room = rooms[roomCode];
     if (!room) return;
     const players = getPlayers(room);
-    if (players.length < 4) {
-      socket.emit('errorMessage', 'ゲーム開始にはGM以外に最低4人のプレイヤーが必要です。');
+    const totalRoles = Object.values(room.roleConfig).reduce((a, b) => a + b, 0);
+
+    if (players.length < 2) {
+      socket.emit('errorMessage', 'プレイヤーが足りません。');
+      return;
+    }
+    if (totalRoles !== players.length) {
+      socket.emit('errorMessage', `役職の合計人数（${totalRoles}人）と参加プレイヤー数（${players.length}人）を一致させてください。`);
       return;
     }
 
-    const cfg = getDefaultRoleConfig(players.length, room.includeBaker);
-    room.roleConfig = cfg;
-
-    // 役職デッキの作成とシャッフル
     const deck = [];
-    Object.entries(cfg).forEach(([roleKey, count]) => {
+    Object.entries(room.roleConfig).forEach(([roleKey, count]) => {
       for (let i = 0; i < count; i++) deck.push(roleKey);
     });
-    while (deck.length < players.length) deck.push('villager');
     for (let i = deck.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [deck[i], deck[j]] = [deck[j], deck[i]];
@@ -515,7 +521,7 @@ io.on('connection', socket => {
       p.lastGuardedId = null;
     });
 
-    // 初日ランダム白の抽選（人狼以外から1名）
+    // 初日ランダム白の抽選
     const seers = players.filter(p => p.role === 'seer');
     seers.forEach(seer => {
       const whiteCandidates = players.filter(p => p.id !== seer.id && p.role !== 'wolf');
@@ -530,7 +536,6 @@ io.on('connection', socket => {
       }
     });
 
-    // 初日の最初の順番発言者をランダム決定
     const randomStarter = players[Math.floor(Math.random() * players.length)];
     room.firstSpeaker = randomStarter.name;
     room.voteHistory = [];
@@ -540,7 +545,7 @@ io.on('connection', socket => {
     transitionToPhase(room, 'night0');
   });
 
-  // 0日目・夜の人狼チャット
+  // 人狼＆GMの夜会話チャット（0日目・1日目以降の夜すべて対応）
   socket.on('sendWolfChat', ({ roomCode, senderName, text }) => {
     const room = rooms[roomCode];
     if (!room || !text.trim()) return;
@@ -557,10 +562,9 @@ io.on('connection', socket => {
 
     room.currentVotes[voterId] = targetId;
 
-    // 全員が投票完了していて、タイマーが1秒で待機中なら即開票へ
     const pending = getPendingActions(room);
     if (pending.length === 0 && room.waitingForActions) {
-      transitionToPhase(room, ' tally_vote');
+      transitionToPhase(room, 'tally_vote');
     } else {
       broadcastRoom(roomCode);
     }
@@ -587,11 +591,10 @@ io.on('connection', socket => {
     } else if (actor.role === 'knight' && !room.nightActions.knightDone) {
       const target = room.participants.find(p => p.id === targetId);
       if (!target || target.isGM || !target.alive || target.id === actor.id) return;
-      if (actor.lastGuardedId === targetId) return; // 連続護衛禁止
+      if (actor.lastGuardedId === targetId) return;
       room.nightActions.knightTarget = targetId;
       room.nightActions.knightDone = true;
     } else if (actor.role === 'wolf') {
-      // 噛み無し（PASS）または人狼以外の生存者を指定可能（自噛み・仲間噛み禁止）
       if (targetId === 'PASS') {
         room.nightActions.wolfTarget = 'PASS';
         room.nightActions.wolfDone = true;
@@ -611,7 +614,7 @@ io.on('connection', socket => {
     }
   });
 
-  // GM操作：盤面共有ボードの更新（CO・結果メモ・確白・投票ロック）
+  // GM操作：盤面共有ボードの更新
   socket.on('gmUpdateBoard', ({ roomCode, playerId, coRole, publicNote, isConfirmedWhite, voteLocked }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -626,14 +629,11 @@ io.on('connection', socket => {
     broadcastRoom(roomCode);
   });
 
-  // GM操作：昼のサブフェーズ切り替え（結果報告 / 順番発言 / 自由議論 / 指名発言・COロック）
+  // GM操作：昼のサブフェーズ切り替え（タイマーはリセットせずそのまま継続）
   socket.on('gmSetDaySubPhase', ({ roomCode, subPhase }) => {
     const room = rooms[roomCode];
     if (!room || room.phase !== 'day') return;
     room.daySubPhase = subPhase;
-    if (subPhase === 'lock') {
-      room.timer = 60; // 指名発言に切り替えたら自動で1分にセット
-    }
     broadcastRoom(roomCode);
   });
 
@@ -656,7 +656,7 @@ io.on('connection', socket => {
       } else if (room.phase === 'day') {
         transitionToPhase(room, 'vote');
       } else if (room.phase === 'vote') {
-        transitionToPhase(room, ' tally_vote');
+        transitionToPhase(room, 'tally_vote');
       } else if (room.phase === 'lastwords') {
         transitionToPhase(room, 'night');
       } else if (room.phase === 'night') {
@@ -677,5 +677,5 @@ io.on('connection', socket => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Werewolf GM Server running on http://localhost:${PORT}`);
+  console.log(`Werewolf Server running on http://localhost:${PORT}`);
 });

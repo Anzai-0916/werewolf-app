@@ -49,12 +49,8 @@
       background: var(--primary-light); color: var(--primary);
     }
     .subphase-lock {
-      background: var(--danger); color: #fff;
-      animation: pulse 1.5s infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.82; }
+      background: #fff3cd; color: #856404;
+      border: 1px solid #ffeeba;
     }
     .btn {
       width: 100%; padding: 13px;
@@ -68,6 +64,11 @@
     }
     .btn-danger {
       background: var(--danger); color: #fff; border: none;
+    }
+    .btn-sm {
+      padding: 5px 12px; border-radius: 6px;
+      border: 1px solid var(--border-soft);
+      background: #f0ece1; font-weight: 700; cursor: pointer;
     }
     .btn-choice {
       width: 100%; text-align: left; padding: 12px 14px;
@@ -84,10 +85,10 @@
     .btn-choice:disabled {
       background: #f2f2f2; color: #aaa; cursor: not-allowed;
     }
-    input[type="text"] {
-      width: 100%; padding: 12px;
-      border: 1px solid var(--border-soft); border-radius: 10px;
-      font-size: 15px; margin-bottom: 10px;
+    input[type="text"], input[type="number"] {
+      width: 100%; padding: 10px;
+      border: 1px solid var(--border-soft); border-radius: 8px;
+      font-size: 14px;
     }
     .board-row {
       display: flex; align-items: center; justify-content: space-between;
@@ -138,26 +139,33 @@
     const socket = io();
     let state = null;
     let showGMModal = false;
-    let showSecretRole = false; // 役職の伏せ表示フラグ
+    let showSecretRole = false;
     let lastPhase = '';
 
-    // 役職の日本語変換マップ
     const ROLE_JP = {
       gm: '👑 GM',
-      villager: '👤 市民',
+      wolf: '🐺 人狼',
+      madman: '🃏 狂人',
       seer: '🔮 占い師',
       medium: '👻 霊媒師',
       knight: '🛡️ 騎士',
-      baker: '🍞 パン屋',
-      madman: '🃏 狂人',
-      wolf: '🐺 人狼'
+      villager: '👤 市民',
+      baker: '🍞 パン屋'
     };
 
-    // タブごとに記憶を独立させる（sessionStorage）
+    const PHASE_JP = {
+      lobby: '待機中',
+      night0: '0日目の夜',
+      day: '昼・議論',
+      vote: '処刑投票',
+      lastwords: '遺言',
+      night: '夜',
+      gameover: 'ゲーム終了'
+    };
+
     let savedRoomCode = sessionStorage.getItem('wf_roomCode') || '';
     let savedParticipantId = sessionStorage.getItem('wf_participantId') || '';
 
-    // 画面リロード時に元の部屋・役職へ自動復帰する処理
     socket.on('connect', () => {
       if (savedRoomCode && savedParticipantId) {
         socket.emit('joinRoom', { roomCode: savedRoomCode, name: '', participantId: savedParticipantId });
@@ -173,11 +181,22 @@
 
     socket.on('errorMessage', msg => alert(msg));
 
+    // 時計の秒数だけを更新するイベント（プルダウンや入力欄が閉じないようにする）
+    socket.on('timerTick', ({ timer, timerPaused, waitingForActions }) => {
+      if (!state) return;
+      state.timer = timer;
+      state.timerPaused = timerPaused;
+      state.waitingForActions = waitingForActions;
+      document.querySelectorAll('.js-timer-display').forEach(el => {
+        el.textContent = formatTime(timer);
+        if (timerPaused) el.classList.add('timer-paused');
+        else el.classList.remove('timer-paused');
+      });
+    });
+
     socket.on('roomState', newState => {
-      // フェーズが切り替わったタイミングで役職の表示/非表示を自動調整
       if (newState.phase !== lastPhase) {
         lastPhase = newState.phase;
-        // 0日目の夜（役職確認）とゲーム終了時だけ自動で開き、昼や投票中は自動で隠す
         showSecretRole = (newState.phase === 'night0' || newState.phase === 'gameover');
       }
       state = newState;
@@ -195,9 +214,9 @@
       render();
     }
 
-    // ホーム画面・ロビー操作
+    // ロビー・基本操作
     function createRoom() {
-      socket.emit('createRoom', { name: 'GM', includeBaker: true });
+      socket.emit('createRoom', { name: 'GM' });
     }
     function joinRoom() {
       const code = document.getElementById('joinCode').value.trim();
@@ -205,8 +224,11 @@
       if (!code || !name) return alert('ゲームコードと名前を入力してください');
       socket.emit('joinRoom', { roomCode: code, name, participantId: null });
     }
-    function toggleBaker(checked) {
-      socket.emit('toggleBaker', { roomCode: state.roomCode, includeBaker: checked });
+    function changeRoleCount(roleKey, delta) {
+      socket.emit('updateRoleConfig', { roomCode: state.roomCode, roleKey, delta });
+    }
+    function changeTimeConfig(timeKey, seconds) {
+      socket.emit('updateTimeConfig', { roomCode: state.roomCode, timeKey, seconds });
     }
     function startGame() {
       socket.emit('startGame', { roomCode: state.roomCode });
@@ -239,7 +261,26 @@
       socket.emit('gmUpdateBoard', payload);
     }
 
-    // 全員共通の「盤面共有ボード」HTML生成
+    // 人狼＆GM用の夜会話チャットカード（0日目・1日目以降の夜対応）
+    function renderWolfChatCard() {
+      if (state.me.role !== 'wolf' && !state.me.isGM) return '';
+      const wolves = state.players.filter(p => p.revealedRole === 'wolf').map(p => p.name).join('・');
+      return `
+        <div class="card">
+          <div style="font-weight:700; font-size:14px; margin-bottom:4px;">🐺 人狼チャット（人狼＆GMのみ表示）</div>
+          <div class="small-note" style="margin-bottom:8px;">人狼メンバー：${wolves || 'なし'}</div>
+          <div style="max-height:120px; overflow-y:auto; background:#f9f9f9; padding:8px; border-radius:8px; margin-bottom:8px; font-size:13px;">
+            ${state.wolfChat.length === 0 ? '<span class="small-note">ここで夜の相談や作戦会議ができます</span>' : state.wolfChat.map(c => `<div style="margin-bottom:4px;"><strong>${c.sender}:</strong>${c.text}</div>`).join('')}
+          </div>
+          <div style="display:flex; gap:6px;">
+            <input type="text" id="wolfChatInput" placeholder="メッセージを入力..." onkeydown="if(event.key==='Enter') sendWolfChat()" />
+            <button class="btn" style="width:85px; margin:0; padding:10px;" onclick="sendWolfChat()">送信</button>
+          </div>
+        </div>
+      `;
+    }
+
+    // 全員共通の盤面共有ボード
     function renderSharedBoard() {
       if (!state || !state.players) return '';
       let bakerBanner = '';
@@ -251,14 +292,13 @@
 
       const rows = state.players.map(p => {
         const statusBadge = !p.alive
-          ? `<span class="badge ${p.deathReason === '襲撃' && p.deathDay === state.day ? 'badge-victim' : 'badge-dead'}">${p.deathDay}日${p.deathReason}</span>`
+          ? `<span class="badge ${p.deathReason === '襲撃' ? 'badge-victim' : 'badge-dead'}">${p.deathDay}日目${p.deathReason}</span>`
           : `<span style="color:#2e8b57; font-weight:600; font-size:12px;">生存</span>`;
 
         const coBadge = p.coRole ? `<span class="badge badge-co">${p.coRole}CO</span>` : '';
         const whiteBadge = p.isConfirmedWhite ? `<span class="badge badge-white">確白</span>` : '';
         const noteText = p.publicNote ? `<div class="small-note" style="margin-top:2px;">📝 ${p.publicNote}</div>` : '';
 
-        // 盤面ボードには「ゲーム終了後」または「GM本人」のみ日本語の正体を表示（プレイヤー画面では昼に仲間人狼のバッジが出ないように隠す）
         const showTrueRole = (state.phase === 'gameover' || state.me.isGM) && p.revealedRole;
         const revealed = showTrueRole ? `<span class="badge" style="background:#444;color:#fff;">${ROLE_JP[p.revealedRole] || p.revealedRole}</span>` : '';
 
@@ -301,16 +341,16 @@
       `).join('');
     }
 
-    // GM管理モーダル画面
+    // GM管理パネル
     function renderGMModal() {
       const subPhaseButtons = state.phase === 'day' ? `
         <div style="margin-bottom:12px;">
-          <div class="small-note" style="margin-bottom:4px;">昼フェーズの表示切り替え</div>
+          <div class="small-note" style="margin-bottom:4px;">昼フェーズの表示切り替え（時間はそのまま継続します）</div>
           <div class="gm-grid">
             <button class="btn btn-secondary" onclick="gmSetSubPhase('report')">☀️ 結果報告</button>
             <button class="btn btn-secondary" onclick="gmSetSubPhase('order')">🗣️ 順番発言</button>
             <button class="btn btn-secondary" onclick="gmSetSubPhase('free')">⏱️ 自由議論</button>
-            <button class="btn btn-danger" onclick="gmSetSubPhase('lock')">🔒 指名発言(COロック)</button>
+            <button class="btn btn-secondary" onclick="gmSetSubPhase('lock')">✋ 指名発言</button>
           </div>
         </div>
       ` : '';
@@ -350,9 +390,13 @@
 
       return `
         <div class="card">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
             <h3 style="margin:0;">👑 GM管理パネル</h3>
-            <span class="small-note">現在: ${state.day}日目 (${state.phase})</span>
+            <span class="small-note" style="font-weight:700;">現在: ${state.day}日目 (${PHASE_JP[state.phase] || state.phase})</span>
+          </div>
+          <div class="center" style="background:#f9f8f3; padding:8px; border-radius:10px; margin-bottom:10px;">
+            <div class="small-note">現在の残り時間</div>
+            <div class="timer-display js-timer-display ${state.timerPaused ? 'timer-paused' : ''}" style="font-size:32px;">${formatTime(state.timer)}</div>
           </div>
           ${pendingAlert}
           <div class="gm-grid">
@@ -362,7 +406,7 @@
             <button class="btn btn-secondary" onclick="gmControl('minus30')">－30秒短縮</button>
           </div>
           ${subPhaseButtons}
-          <div style="font-weight:700; font-size:14px; margin:12px 0 6px;">📋 盤面ボード＆投票ロック操作（全員の画面に即反映）</div>
+          <div style="font-weight:700; font-size:14px; margin:12px 0 6px;">📋 盤面ボード＆投票ロック操作（全員に即反映）</div>
           ${playerControls}
           <button class="btn btn-danger" style="margin-top:16px;" onclick="if(confirm('ロビーに戻りますか？')) gmControl('resetToLobby')">ロビーへリセット</button>
           <button class="btn btn-secondary" onclick="showGMModal=false; render();">ゲーム画面へ戻る</button>
@@ -370,7 +414,7 @@
       `;
     }
 
-    // 自分の役職＆結果履歴（タップで表示/非表示を切り替えられるカード）
+    // 自分の役職＆結果履歴（タップで表示/非表示）
     function renderSecretRoleSection() {
       if (state.me.isGM) {
         return `<div class="card center"><strong>👑 あなたは GM（進行役）です</strong><div class="small-note">右下の「GM管理パネル」から進行と盤面を操作できます</div></div>`;
@@ -441,7 +485,7 @@
     function render() {
       const app = document.getElementById('app');
 
-      // 1. 未接続（トップ画面）
+      // 1. トップ画面
       if (!state) {
         app.innerHTML = `
           <div class="card center">
@@ -450,35 +494,76 @@
           </div>
           <div class="card">
             <div style="font-weight:700; margin-bottom:8px;">ゲームに参加</div>
-            <input type="text" id="joinCode" placeholder="6桁のゲームコード" value="${savedRoomCode}" />
-            <input type="text" id="joinName" placeholder="あなたの名前" />
+            <input type="text" id="joinCode" style="margin-bottom:10px;" placeholder="6桁のゲームコード" value="${savedRoomCode}" />
+            <input type="text" id="joinName" style="margin-bottom:10px;" placeholder="あなたの名前" />
             <button class="btn btn-secondary" onclick="joinRoom()">参加する</button>
           </div>
         `;
         return;
       }
 
-      // GMモーダルを開いている場合
       if (state.me.isGM && showGMModal) {
         app.innerHTML = renderGMModal();
         return;
       }
 
-      // 2. ロビー待機画面
+      // 2. ロビー待機＆GMルール設定画面
       if (state.phase === 'lobby') {
         const pList = state.players.map(p => `
           <div class="board-row"><span>${p.name}</span><span style="color:#2e8b57;">参加中</span></div>
         `).join('');
 
-        const gmControls = state.me.isGM ? `
-          <div style="margin-top:12px; padding-top:12px; border-top:1px solid #eee;">
-            <label style="font-size:14px; font-weight:600; display:flex; align-items:center; gap:8px;">
-              <input type="checkbox" ${state.includeBaker ? 'checked' : ''} onchange="toggleBaker(this.checked)" />
-              🍞 パン屋（進行役・生存通知）を入れる
-            </label>
-            <button class="btn" style="margin-top:12px;" onclick="startGame()">ゲーム開始（${state.players.length}人）</button>
+        const roleKeys = ['wolf', 'madman', 'seer', 'medium', 'knight', 'villager', 'baker'];
+        const totalRoles = roleKeys.reduce((sum, k) => sum + (state.roleConfig[k] || 0), 0);
+        const countMatch = totalRoles === state.players.length;
+
+        const gmLobbySettings = state.me.isGM ? `
+          <div class="card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <strong>🎭 役職の人数配分設定</strong>
+              <span style="font-size:13px; font-weight:700; color:${countMatch ? '#2e8b57' : 'var(--danger)'};">
+                役職合計: ${totalRoles}人 / 参加者: ${state.players.length}人
+              </span>
+            </div>
+            ${roleKeys.map(k => `
+              <div class="board-row">
+                <span>${ROLE_JP[k]}</span>
+                <div style="display:flex; align-items:center; gap:10px;">
+                  <button class="btn-sm" onclick="changeRoleCount('${k}', -1)">－</button>
+                  <strong style="width:24px; text-align:center;">${state.roleConfig[k] || 0}</strong>
+                  <button class="btn-sm" onclick="changeRoleCount('${k}', 1)">＋</button>
+                </div>
+              </div>
+            `).join('')}
           </div>
-        ` : `<p class="small-note center">GMがゲームを開始するのを待っています...</p>`;
+
+          <div class="card">
+            <div style="font-weight:700; margin-bottom:8px;">⏱️ 各フェーズの時間設定（秒）</div>
+            <div class="board-row">
+              <span>0日目の夜（役職確認）</span>
+              <input type="number" style="width:90px;" value="${state.timeConfig.night0}" onchange="changeTimeConfig('night0', this.value)" />
+            </div>
+            <div class="board-row">
+              <span>昼の議論時間</span>
+              <input type="number" style="width:90px;" value="${state.timeConfig.day}" onchange="changeTimeConfig('day', this.value)" />
+            </div>
+            <div class="board-row">
+              <span>処刑投票</span>
+              <input type="number" style="width:90px;" value="${state.timeConfig.vote}" onchange="changeTimeConfig('vote', this.value)" />
+            </div>
+            <div class="board-row">
+              <span>最後の一言（遺言）</span>
+              <input type="number" style="width:90px;" value="${state.timeConfig.lastwords}" onchange="changeTimeConfig('lastwords', this.value)" />
+            </div>
+            <div class="board-row">
+              <span>夜の行動時間</span>
+              <input type="number" style="width:90px;" value="${state.timeConfig.night}" onchange="changeTimeConfig('night', this.value)" />
+            </div>
+            <button class="btn" style="margin-top:14px;" onclick="startGame()">
+              ゲーム開始（参加者 ${state.players.length}人）
+            </button>
+          </div>
+        ` : `<div class="card center"><p class="small-note">GMが役職配分と時間を設定して開始するのを待っています...</p></div>`;
 
         app.innerHTML = `
           <div class="card center">
@@ -487,35 +572,26 @@
             <div class="small-note">プレイヤー参加人数：${state.players.length}人（＋GM）</div>
           </div>
           <div class="card">
-            <div style="font-weight:700; margin-bottom:8px;">参加者（あなた：${state.me.name}）</div>
+            <div style="font-weight:700; margin-bottom:8px;">参加者一覧（あなた：${state.me.name}）</div>
             <div class="board-row"><strong>👑 GM</strong><span>進行役</span></div>
             ${pList}
-            ${gmControls}
           </div>
+          ${gmLobbySettings}
         `;
         return;
       }
 
-      // 共通ヘッダー（タイマー＆フェーズ表示）
-      const phaseTitleMap = {
-        night0: '役職確認（0日目の夜）',
-        day: `${state.day}日目の昼・議論`,
-        vote: `${state.day}日目の夕方・処刑投票`,
-        lastwords: '最後の一言（遺言）',
-        night: `${state.day}日目の夜・役職行動`,
-        gameover: 'ゲーム終了'
-      };
-
+      // 共通ヘッダー
       const waitingBanner = state.waitingForActions ? `
-        <div class="subphase-banner subphase-lock">
+        <div class="subphase-banner" style="background:var(--danger); color:#fff;">
           ⚠️ まだ選択を終えていないプレイヤーがいます！全員がボタンを押すまでタイマーが停止しています。
         </div>
       ` : '';
 
       const headerCard = `
         <div class="card center">
-          <div class="small-note">${phaseTitleMap[state.phase] || ''}（あなた：${state.me.name}）</div>
-          <div class="timer-display ${state.timerPaused ? 'timer-paused' : ''}">${formatTime(state.timer)}</div>
+          <div class="small-note">${state.day}日目・${PHASE_JP[state.phase] || ''}（あなた：${state.me.name}）</div>
+          <div class="timer-display js-timer-display ${state.timerPaused ? 'timer-paused' : ''}">${formatTime(state.timer)}</div>
           ${state.timerPaused ? '<div style="color:var(--danger); font-size:12px; font-weight:700;">⏸ GMによりタイマー一時停止中</div>' : ''}
         </div>
         ${waitingBanner}
@@ -525,35 +601,19 @@
       let mainSection = '';
 
       if (state.phase === 'night0') {
-        const wolfSection = (state.me.role === 'wolf' || state.me.isGM) ? `
-          <div class="card">
-            <div style="font-weight:700; font-size:14px; margin-bottom:6px;">🐺 人狼の仲間確認＆作戦チャット</div>
-            <div class="small-note" style="margin-bottom:8px;">
-              人狼メンバー：${state.players.filter(p => p.revealedRole === 'wolf').map(p => p.name).join('・')}
-            </div>
-            <div style="max-height:100px; overflow-y:auto; background:#f9f9f9; padding:8px; border-radius:8px; margin-bottom:8px; font-size:13px;">
-              ${state.wolfChat.length === 0 ? '<span class="small-note">誰が占い師に出るか相談しましょう</span>' : state.wolfChat.map(c => `<div><strong>${c.sender}:</strong>${c.text}</div>`).join('')}
-            </div>
-            <div style="display:flex; gap:6px;">
-              <input type="text" id="wolfChatInput" style="margin:0;" placeholder="例：私が占い師に出ます！" />
-              <button class="btn" style="width:90px; margin:0;" onclick="sendWolfChat()">送信</button>
-            </div>
-          </div>
-        ` : '';
-
         mainSection = `
           <div class="card center">
             <div style="font-weight:700;">🗣️ 最初の順番発言</div>
             <div style="font-size:18px; font-weight:700; margin-top:4px;">${state.firstSpeaker}さん から時計回り</div>
           </div>
-          ${wolfSection}
+          ${renderWolfChatCard()}
         `;
       } else if (state.phase === 'day') {
         const subPhaseMap = {
           report: { text: '☀️ 【朝の結果報告】占い師・霊媒師は事実のみ報告してください（新規CO挙手可）', cls: '' },
           order: { text: `🗣️ 【順番発言】${state.firstSpeaker}さんから時計回りで1人ずつ発言してください`, cls: '' },
-          free: { text: '⏱️ 【自由議論】全員で話し合ってください（新規役職COはこの時間まで！）', cls: '' },
-          lock: { text: '🔒 【盤面ロック・指名発言】これ以降の新規役職COは無効です！指名されたグレーのみ回答してください', cls: 'subphase-lock' }
+          free: { text: '⏱️ 【自由議論】全員で話し合ってください（この時間は、新規役職COできます）', cls: '' },
+          lock: { text: '✋ 【指名発言】指名された方のみ回答してください', cls: 'subphase-lock' }
         };
         const sp = subPhaseMap[state.daySubPhase] || subPhaseMap.order;
         mainSection = `
@@ -599,8 +659,9 @@
           </div>
         `;
       } else if (state.phase === 'night') {
+        let actionCard = '';
         if (!state.me.alive || state.me.isGM) {
-          mainSection = `<div class="card center">夜の行動フェーズです。全員が完了するのを待っています...（未完了：${state.pendingCount}）</div>`;
+          actionCard = `<div class="card center">夜の行動フェーズです。全員が完了するのを待っています...（未完了：${state.pendingCount}）</div>`;
         } else if (state.me.role === 'seer') {
           const choices = state.players.filter(p => p.alive && p.id !== state.me.id).map(p => {
             const isSelected = state.me.nightSelection === p.id;
@@ -608,7 +669,7 @@
               <span>${isSelected ? '✔ ' : ''}${p.name} を占う</span>
             </button>`;
           }).join('');
-          mainSection = `<div class="card"><div style="font-weight:700; margin-bottom:8px;">🔮 今夜占う対象を1名選んでください（必須）</div>${choices}</div>`;
+          actionCard = `<div class="card"><div style="font-weight:700; margin-bottom:8px;">🔮 今夜占う対象を1名選んでください</div>${choices}</div>`;
         } else if (state.me.role === 'knight') {
           const choices = state.players.filter(p => p.alive && p.id !== state.me.id).map(p => {
             const isConsecutive = state.me.lastGuardedId === p.id;
@@ -618,7 +679,7 @@
               <span class="small-note">${isConsecutive ? '🚫昨夜護衛(連続不可)' : (p.coRole ? p.coRole + 'CO' : '')}</span>
             </button>`;
           }).join('');
-          mainSection = `<div class="card"><div style="font-weight:700; margin-bottom:8px;">🛡️ 今夜守る対象を1名選んでください（連続護衛不可・必須）</div>${choices}</div>`;
+          actionCard = `<div class="card"><div style="font-weight:700; margin-bottom:8px;">🛡️ 今夜守る対象を1名選んでください（連続護衛不可）</div>${choices}</div>`;
         } else if (state.me.role === 'wolf') {
           const choices = state.players.filter(p => p.alive && p.revealedRole !== 'wolf').map(p => {
             const isSelected = state.me.nightSelection === p.id;
@@ -628,7 +689,7 @@
             </button>`;
           }).join('');
           const isPass = state.me.nightSelection === 'PASS';
-          mainSection = `
+          actionCard = `
             <div class="card">
               <div style="font-weight:700; margin-bottom:8px;">🐺 今夜襲撃する対象を選んでください（自噛み禁止）</div>
               ${choices}
@@ -638,8 +699,13 @@
             </div>
           `;
         } else {
-          mainSection = `<div class="card center">🌙 夜になりました。この夜に行う行動はありません。机をトントンと叩いて朝を待ってください。</div>`;
+          actionCard = `<div class="card center">🌙 夜になりました。この夜に行う行動はありません。朝を待ってください。</div>`;
         }
+
+        mainSection = `
+          ${actionCard}
+          ${renderWolfChatCard()}
+        `;
       } else if (state.phase === 'gameover') {
         const isVillageWin = state.winner === 'village';
         mainSection = `
