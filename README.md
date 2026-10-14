@@ -2,7 +2,7 @@
 
 対面での人狼ゲームの進行管理と盤面整理をリアルタイムでサポートするWebアプリです。
 
-▶ [アプリを開く](https://wolf-game-eeandesign.onrender.com/)
+▶ [アプリを開く](https://werewolf-game-gwl8.onrender.com/)
 
 ## 概要
 
