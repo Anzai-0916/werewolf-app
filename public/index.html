@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>人狼ゲーム - 盤面共有＆GMアシスト版</title>
+  <title>人狼ゲーム</title>
   <script src="/socket.io/socket.io.js"></script>
   <style>
     :root {
@@ -123,6 +123,12 @@
       display: flex; justify-content: space-between;
       padding: 6px 0; border-bottom: 1px solid #f0ece1; font-size: 14px;
     }
+    .secret-toggle {
+      background: #f0ece1; color: var(--text-main);
+      border: 1px dashed #c5beaa; padding: 12px;
+      border-radius: 10px; font-weight: 700; font-size: 14px;
+      cursor: pointer; width: 100%; text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -132,19 +138,48 @@
     const socket = io();
     let state = null;
     let showGMModal = false;
-    let savedRoomCode = localStorage.getItem('wf_roomCode') || '';
-    let savedParticipantId = localStorage.getItem('wf_participantId') || '';
+    let showSecretRole = false; // 役職の伏せ表示フラグ
+    let lastPhase = '';
+
+    // 役職の日本語変換マップ
+    const ROLE_JP = {
+      gm: '👑 GM',
+      villager: '👤 市民',
+      seer: '🔮 占い師',
+      medium: '👻 霊媒師',
+      knight: '🛡️ 騎士',
+      baker: '🍞 パン屋',
+      madman: '🃏 狂人',
+      wolf: '🐺 人狼'
+    };
+
+    // タブごとに記憶を独立させる（sessionStorage）
+    let savedRoomCode = sessionStorage.getItem('wf_roomCode') || '';
+    let savedParticipantId = sessionStorage.getItem('wf_participantId') || '';
+
+    // 画面リロード時に元の部屋・役職へ自動復帰する処理
+    socket.on('connect', () => {
+      if (savedRoomCode && savedParticipantId) {
+        socket.emit('joinRoom', { roomCode: savedRoomCode, name: '', participantId: savedParticipantId });
+      }
+    });
 
     socket.on('joinedRoom', ({ roomCode, participantId }) => {
       savedRoomCode = roomCode;
       savedParticipantId = participantId;
-      localStorage.setItem('wf_roomCode', roomCode);
-      localStorage.setItem('wf_participantId', participantId);
+      sessionStorage.setItem('wf_roomCode', roomCode);
+      sessionStorage.setItem('wf_participantId', participantId);
     });
 
     socket.on('errorMessage', msg => alert(msg));
 
     socket.on('roomState', newState => {
+      // フェーズが切り替わったタイミングで役職の表示/非表示を自動調整
+      if (newState.phase !== lastPhase) {
+        lastPhase = newState.phase;
+        // 0日目の夜（役職確認）とゲーム終了時だけ自動で開き、昼や投票中は自動で隠す
+        showSecretRole = (newState.phase === 'night0' || newState.phase === 'gameover');
+      }
       state = newState;
       render();
     });
@@ -155,6 +190,11 @@
       return `${m}:${s}`;
     }
 
+    function toggleSecretRole() {
+      showSecretRole = !showSecretRole;
+      render();
+    }
+
     // ホーム画面・ロビー操作
     function createRoom() {
       socket.emit('createRoom', { name: 'GM', includeBaker: true });
@@ -163,7 +203,7 @@
       const code = document.getElementById('joinCode').value.trim();
       const name = document.getElementById('joinName').value.trim();
       if (!code || !name) return alert('ゲームコードと名前を入力してください');
-      socket.emit('joinRoom', { roomCode: code, name, participantId: savedParticipantId });
+      socket.emit('joinRoom', { roomCode: code, name, participantId: null });
     }
     function toggleBaker(checked) {
       socket.emit('toggleBaker', { roomCode: state.roomCode, includeBaker: checked });
@@ -217,7 +257,10 @@
         const coBadge = p.coRole ? `<span class="badge badge-co">${p.coRole}CO</span>` : '';
         const whiteBadge = p.isConfirmedWhite ? `<span class="badge badge-white">確白</span>` : '';
         const noteText = p.publicNote ? `<div class="small-note" style="margin-top:2px;">📝 ${p.publicNote}</div>` : '';
-        const revealed = p.revealedRole ? `<span class="badge" style="background:#444;color:#fff;">正体:${p.revealedRole}</span>` : '';
+
+        // 盤面ボードには「ゲーム終了後」または「GM本人」のみ日本語の正体を表示（プレイヤー画面では昼に仲間人狼のバッジが出ないように隠す）
+        const showTrueRole = (state.phase === 'gameover' || state.me.isGM) && p.revealedRole;
+        const revealed = showTrueRole ? `<span class="badge" style="background:#444;color:#fff;">${ROLE_JP[p.revealedRole] || p.revealedRole}</span>` : '';
 
         return `
           <div class="board-row ${!p.alive ? 'dead-row' : ''}">
@@ -281,7 +324,7 @@
       const playerControls = state.players.map(p => `
         <div style="border-bottom:1px solid #eee; padding:8px 0; font-size:13px;">
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-            <strong>${p.name} <span class="small-note">（実役職:${p.revealedRole || ''}）</span></strong>
+            <strong>${p.name} <span class="badge" style="background:#eee; color:#333;">${ROLE_JP[p.revealedRole] || ''}</span></strong>
             <div>
               <label style="margin-right:6px;">
                 <input type="checkbox" ${p.isConfirmedWhite ? 'checked' : ''} onchange="gmUpdatePlayer('${p.id}', 'isConfirmedWhite', this.checked)" /> 確白
@@ -327,6 +370,74 @@
       `;
     }
 
+    // 自分の役職＆結果履歴（タップで表示/非表示を切り替えられるカード）
+    function renderSecretRoleSection() {
+      if (state.me.isGM) {
+        return `<div class="card center"><strong>👑 あなたは GM（進行役）です</strong><div class="small-note">右下の「GM管理パネル」から進行と盤面を操作できます</div></div>`;
+      }
+
+      const deadAlert = !state.me.alive ? '<div style="color:var(--danger); font-weight:700; margin-bottom:8px;">💀 あなたは死亡しました（霊界・発言禁止）</div>' : '';
+
+      if (!showSecretRole) {
+        return `
+          <div class="card center">
+            ${deadAlert}
+            <button class="secret-toggle" onclick="toggleSecretRole()">
+              👁️ タップして自分の役職・結果を確認する（周囲に注意）
+            </button>
+          </div>
+        `;
+      }
+
+      let historyHtml = '';
+      if (state.me.seerHistory && state.me.seerHistory.length > 0) {
+        historyHtml += `
+          <div style="margin-top:12px; padding-top:10px; border-top:1px solid #eee; text-align:left;">
+            <div style="font-weight:700; font-size:13px; margin-bottom:4px;">🔮 あなたの占い結果履歴</div>
+            ${state.me.seerHistory.map(h => `
+              <div class="history-row">
+                <span>${h.label}：<strong>${h.targetName}さん</strong></span>
+                <strong style="color:${h.isWolf ? 'var(--danger)' : '#2e8b57'};">${h.isWolf ? '🐺 人狼（黒）' : '⚪ 市民（白）'}</strong>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      }
+      if (state.me.mediumHistory && state.me.mediumHistory.length > 0) {
+        historyHtml += `
+          <div style="margin-top:12px; padding-top:10px; border-top:1px solid #eee; text-align:left;">
+            <div style="font-weight:700; font-size:13px; margin-bottom:4px;">👻 あなたの霊媒結果履歴</div>
+            ${state.me.mediumHistory.map(h => `
+              <div class="history-row">
+                <span>${h.day}日目処刑：<strong>${h.targetName}さん</strong></span>
+                <strong style="color:${h.isWolf ? 'var(--danger)' : '#2e8b57'};">${h.isWolf ? '🐺 人狼（黒）' : '⚪ 市民（白）'}</strong>
+              </div>
+            `).join('')}
+          </div>
+        `;
+      }
+      if (state.me.role === 'wolf') {
+        const partners = state.players.filter(p => p.revealedRole === 'wolf').map(p => p.name).join('・');
+        historyHtml += `
+          <div style="margin-top:10px; font-size:13px; color:var(--danger); font-weight:700;">
+            🐺 仲間の人狼：${partners}
+          </div>
+        `;
+      }
+
+      return `
+        <div class="card center">
+          ${deadAlert}
+          <div class="role-icon">${state.me.roleInfo.icon}</div>
+          <div style="font-weight:700; font-size:18px;">${state.me.roleInfo.name}</div>
+          ${historyHtml}
+          <button class="btn btn-secondary" style="margin-top:12px; padding:8px; font-size:13px;" onclick="toggleSecretRole()">
+            🙈 役職と結果を隠す
+          </button>
+        </div>
+      `;
+    }
+
     function render() {
       const app = document.getElementById('app');
 
@@ -334,15 +445,14 @@
       if (!state) {
         app.innerHTML = `
           <div class="card center">
-            <h2 style="margin-top:4px;">🐺 人狼ゲーム</h2>
-            <p class="small-note">10人村・盤面共有＆GMアシスト対応版</p>
-            <button class="btn" onclick="createRoom()">👑 GMとして部屋を作る</button>
+            <h2 style="margin:8px 0 12px;">人狼ゲーム</h2>
+            <button class="btn" onclick="createRoom()">ゲームを作る（GM）</button>
           </div>
           <div class="card">
-            <div style="font-weight:700; margin-bottom:8px;">プレイヤーとして参加</div>
+            <div style="font-weight:700; margin-bottom:8px;">ゲームに参加</div>
             <input type="text" id="joinCode" placeholder="6桁のゲームコード" value="${savedRoomCode}" />
-            <input type="text" id="joinName" placeholder="あなたの名前（例：たくま）" />
-            <button class="btn btn-secondary" onclick="joinRoom()">ゲームに参加</button>
+            <input type="text" id="joinName" placeholder="あなたの名前" />
+            <button class="btn btn-secondary" onclick="joinRoom()">参加する</button>
           </div>
         `;
         return;
@@ -377,8 +487,8 @@
             <div class="small-note">プレイヤー参加人数：${state.players.length}人（＋GM）</div>
           </div>
           <div class="card">
-            <div style="font-weight:700; margin-bottom:8px;">参加者一覧</div>
-            <div class="board-row"><strong>👑 ${state.me.isGM ? 'あなた (GM)' : 'GM'}</strong><span>進行役</span></div>
+            <div style="font-weight:700; margin-bottom:8px;">参加者（あなた：${state.me.name}）</div>
+            <div class="board-row"><strong>👑 GM</strong><span>進行役</span></div>
             ${pList}
             ${gmControls}
           </div>
@@ -388,12 +498,12 @@
 
       // 共通ヘッダー（タイマー＆フェーズ表示）
       const phaseTitleMap = {
-        night0: '0日目の夜（役職確認・初日白通知）',
+        night0: '役職確認（0日目の夜）',
         day: `${state.day}日目の昼・議論`,
         vote: `${state.day}日目の夕方・処刑投票`,
-        lastwords: '処刑・最後の一言（遺言）',
+        lastwords: '最後の一言（遺言）',
         night: `${state.day}日目の夜・役職行動`,
-        gameover: 'ゲーム終了（ノーサイド）'
+        gameover: 'ゲーム終了'
       };
 
       const waitingBanner = state.waitingForActions ? `
@@ -404,50 +514,12 @@
 
       const headerCard = `
         <div class="card center">
-          <div class="small-note">${phaseTitleMap[state.phase] || ''}</div>
+          <div class="small-note">${phaseTitleMap[state.phase] || ''}（あなた：${state.me.name}）</div>
           <div class="timer-display ${state.timerPaused ? 'timer-paused' : ''}">${formatTime(state.timer)}</div>
           ${state.timerPaused ? '<div style="color:var(--danger); font-size:12px; font-weight:700;">⏸ GMによりタイマー一時停止中</div>' : ''}
         </div>
         ${waitingBanner}
       `;
-
-      // 自分の役職カード（折りたたみ可能・シンプル表示）
-      const roleCard = `
-        <div class="card center">
-          <div class="role-icon">${state.me.roleInfo.icon}</div>
-          <div style="font-weight:700; font-size:17px;">${state.me.roleInfo.name}</div>
-          ${!state.me.alive ? '<div style="color:var(--danger); font-weight:700; margin-top:4px;">💀 あなたは死亡しました（霊界・発言禁止）</div>' : ''}
-        </div>
-      `;
-
-      // 占い師・霊媒師の個人結果履歴カード
-      let myAbilityHistory = '';
-      if (state.me.seerHistory && state.me.seerHistory.length > 0) {
-        myAbilityHistory = `
-          <div class="card">
-            <div style="font-weight:700; font-size:14px; margin-bottom:6px;">🔮 あなたの占い結果履歴</div>
-            ${state.me.seerHistory.map(h => `
-              <div class="history-row">
-                <span>${h.label}：<strong>${h.targetName}さん</strong></span>
-                <strong style="color:${h.isWolf ? 'var(--danger)' : '#2e8b57'};">${h.isWolf ? '🐺 人狼（黒）' : '⚪ 市民（白）'}</strong>
-              </div>
-            `).join('')}
-          </div>
-        `;
-      }
-      if (state.me.mediumHistory && state.me.mediumHistory.length > 0) {
-        myAbilityHistory += `
-          <div class="card">
-            <div style="font-weight:700; font-size:14px; margin-bottom:6px;">👻 あなたの霊媒結果履歴</div>
-            ${state.me.mediumHistory.map(h => `
-              <div class="history-row">
-                <span>${h.day}日目処刑：<strong>${h.targetName}さん</strong></span>
-                <strong style="color:${h.isWolf ? 'var(--danger)' : '#2e8b57'};">${h.isWolf ? '🐺 人狼（黒）' : '⚪ 市民（白）'}</strong>
-              </div>
-            `).join('')}
-          </div>
-        `;
-      }
 
       // フェーズ別メインコンテンツ
       let mainSection = '';
@@ -471,7 +543,7 @@
 
         mainSection = `
           <div class="card center">
-            <div style="font-weight:700;">🗣️ 初日の最初の順番発言</div>
+            <div style="font-weight:700;">🗣️ 最初の順番発言</div>
             <div style="font-size:18px; font-weight:700; margin-top:4px;">${state.firstSpeaker}さん から時計回り</div>
           </div>
           ${wolfSection}
@@ -590,8 +662,7 @@
         ${headerCard}
         ${mainSection}
         ${renderSharedBoard()}
-        ${roleCard}
-        ${myAbilityHistory}
+        ${renderSecretRoleSection()}
         ${renderVoteHistory()}
         ${gmFloatingButton}
       `;
